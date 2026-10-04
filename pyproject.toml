@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-eval-local"
+version = "0.2.0"
+description = "Local-first, evidence-based evaluation for business agents"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/BruceLiu-168/agent-eval"
+
+[project.scripts]
+agent-eval = "agent_eval.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["agent_eval*"]
+
+[tool.setuptools.package-data]
+agent_eval = ["data/*.jsonl"]

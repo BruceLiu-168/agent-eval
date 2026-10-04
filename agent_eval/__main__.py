@@ -7,7 +7,9 @@ from pathlib import Path
 from .core import summarize
 from .offline import compare, execute, load_cases, resolve_adapter
 
-DEFAULT_DATASET = str(Path(__file__).resolve().parents[1] / "examples" / "cases.jsonl")
+from .scaffold import bundled_dataset
+
+DEFAULT_DATASET = str(bundled_dataset())
 
 
 def write_json(path, value):
@@ -84,7 +86,7 @@ def demo(out):
     return manifest
 
 
-def main(argv=None):
+def legacy_main(argv=None):
     parser = argparse.ArgumentParser(description="Vendor-neutral Agent Eval reference implementation")
     sub = parser.add_subparsers(dest="command", required=True)
     demo_parser = sub.add_parser("demo", help="run all three schemes and the feedback loop")
@@ -121,4 +123,5 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    from .cli import main
     raise SystemExit(main())

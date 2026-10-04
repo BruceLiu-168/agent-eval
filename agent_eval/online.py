@@ -27,6 +27,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .contracts import validate_case, validate_episode
+
 
 _EMAIL = re.compile(r"(?<![\w.+-])[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9-]+(?:\.[A-Z0-9-]+)+", re.I)
 _SECRET_KEY = re.compile(r"password|passwd|(?:^|_)pwd(?:_|$)|token|secret|credential|apikey|api_key|authorization|cookie|privatekey|private_key", re.I)
@@ -137,46 +139,36 @@ def _review(value: Any) -> dict[str, Any]:
 
 
 def _case_error(case: Any) -> str | None:
+    """Return a promotion refusal while using the shared framework contract."""
     if not isinstance(case, dict):
         return "missing replay_case"
-    if not isinstance(case.get("expected_state"), dict) or not case["expected_state"]:
-        return "missing oracle: expected_state must be a nonempty independent object"
-    for key in ("case_id", "business", "family_id"):
-        if not isinstance(case.get(key), str) or not case[key].strip():
-            return f"replay_case.{key} must be a nonempty string"
-    if "input" not in case or not isinstance(case.get("initial_state"), dict):
-        return "replay_case requires input and an initial_state object"
-    for key in ("forbidden_actions", "required_actions"):
-        if not isinstance(case.get(key), list) or not all(isinstance(item, str) and item for item in case[key]):
-            return f"replay_case.{key} must be a list of action strings"
-    for order_key in ("required_order", "required_success_before"):
-        order = case.get(order_key, [] if order_key == "required_success_before" else None)
-        if not isinstance(order, list) or not all(
-            isinstance(group, list) and len(group) == 2 and all(isinstance(item, str) and item for item in group)
-            for group in order
-        ):
-            return f"replay_case.{order_key} must be a list of [before, after] action pairs"
-    limits = case.get("limits")
-    if not isinstance(limits, dict):
-        return "replay_case.limits must be an object"
+    if not (isinstance(case.get("expected_state"), dict) and case["expected_state"]
+            or "expected_output" in case or case.get("checks") or case.get("rubric")):
+        return "missing oracle: replay_case requires expected_state, expected_output, checks, or rubric"
     try:
-        for key in ("max_steps", "max_cost", "max_latency_ms"):
-            _number(limits.get(key), f"limits.{key}")
-        if not isinstance(limits["max_steps"], int) or isinstance(limits["max_steps"], bool):
-            return "limits.max_steps must be an integer"
+        validate_case(case)
     except ValueError as exc:
-        return str(exc)
+        message = str(exc).replace("case.", "replay_case.", 1)
+        # Keep the existing diagnostic recognizable for users migrating datasets.
+        if "required_order" in message or "required_success_before" in message:
+            message += "; expected action pairs [before, after]"
+        return message
     return None
 
 
 def _fingerprint(case: dict[str, Any]) -> str:
-    # IDs alone must not suppress distinct cases within a family. Excluding the
-    # case ID also deduplicates renamed copies of the same replayable scenario.
-    meaningful = {key: case[key] for key in (
-        "business", "family_id", "input", "initial_state", "expected_state",
-        "forbidden_actions", "required_actions", "required_order", "limits",
-    )}
-    meaningful["required_success_before"] = case.get("required_success_before", [])
+    # Include all grading semantics, including explicit null output. Renamed
+    # copies deduplicate, while altered checks/rubrics remain distinct scenarios.
+    normalized = validate_case(case)
+    meaningful = {key: normalized[key] for key in (
+        "business", "input", "initial_state", "expected_state", "expected_output",
+    ) if key in normalized}
+    meaningful["family_id"] = (None if normalized["family_id"] == normalized["case_id"]
+                               else normalized["family_id"])
+    for key in ("forbidden_actions", "required_actions", "required_order", "required_success_before",
+                "checks", "rubric"):
+        meaningful[key] = normalized.get(key, [])
+    meaningful["limits"] = normalized.get("limits", {})
     return hashlib.sha256(_json(meaningful).encode()).hexdigest()
 
 
@@ -239,30 +231,15 @@ class OnlineStore:
             raise ValueError("random_rate must be between 0 and 1")
         if not isinstance(record, dict) or not isinstance(record.get("episode"), dict):
             raise ValueError("record.episode must be an object")
-        episode = record["episode"]
-        episode_id = _text(episode.get("episode_id"), "episode.episode_id")
-        for key in ("case_id", "agent_version"):
-            _text(episode.get(key), f"episode.{key}")
-        if not isinstance(episode.get("final_state"), dict):
-            raise ValueError("episode.final_state must be an object")
-        if episode.get("status") not in ("completed", "infra_error"):
-            raise ValueError("episode.status must be completed or infra_error")
-        for key in ("cost", "latency_ms"):
-            _number(episode.get(key), f"episode.{key}")
-        events = episode.get("events")
-        if not isinstance(events, list):
-            raise ValueError("episode.events must be a list")
-        for event in events:
-            if not isinstance(event, dict) or not isinstance(event.get("args"), dict) or "result" not in event:
-                raise ValueError("each event requires action, args object, result, and agent_id")
-            _text(event.get("action"), "event.action")
-            _text(event.get("agent_id"), "event.agent_id")
+        episode = validate_episode(record["episode"])
+        episode_id = episode["episode_id"]
         if not isinstance(episode.get("metadata", {}), dict):
             raise ValueError("episode.metadata must be an object")
         risk_flags = record.get("risk_flags", [])
         if not isinstance(risk_flags, list) or not all(isinstance(flag, str) and flag for flag in risk_flags):
             raise ValueError("risk_flags must be a list of nonempty strings")
         normalized = dict(record)
+        normalized["episode"] = episode
         normalized["observed_at"] = _timestamp(record.get("observed_at"), "observed_at")
         normalized["outcome"] = _outcome(record.get("outcome"))
         normalized["review"] = _review(record.get("review", {"verified": False, "reviewer": ""}))
@@ -398,6 +375,7 @@ class OnlineStore:
                 error = _case_error(case)
                 if error:
                     raise ValueError(f"invalid regression file line {line_number}: {error}")
+                case = validate_case(case)
                 fingerprint = _fingerprint(case)
                 if case["case_id"] in case_id_fingerprints:
                     raise ValueError(f"invalid regression file line {line_number}: duplicate case_id")
@@ -420,6 +398,7 @@ class OnlineStore:
                 if error:
                     rejected.append({"episode_id": episode_id, "reason": error})
                     continue
+                case = validate_case(case)
                 fingerprint = _fingerprint(case)
                 existing_fingerprint = case_id_fingerprints.get(case["case_id"])
                 if existing_fingerprint is not None and existing_fingerprint != fingerprint:
@@ -472,7 +451,13 @@ def main(argv: list[str] | None = None) -> int:
     promote_parser = sub.add_parser("promote")
     promote_parser.add_argument("output")
     promote_parser.add_argument("--as-of", required=True)
+    annotate_parser = sub.add_parser("annotate", help="backfill delayed outcome labels and review")
+    annotate_parser.add_argument("--episode-id", required=True)
+    annotate_parser.add_argument("--outcome", help="JSON file containing mature_at, success, and source")
+    annotate_parser.add_argument("--review", help="JSON file containing verified and reviewer")
     args = parser.parse_args(argv)
+    if args.command == "annotate" and not (args.outcome or args.review):
+        parser.error("annotate requires at least one of --outcome or --review")
     try:
         with OnlineStore(args.db) as store:
             if args.command == "ingest":
@@ -480,12 +465,27 @@ def main(argv: list[str] | None = None) -> int:
                     result = [store.ingest(json.loads(line), args.random_rate) for line in source if line.strip()]
             elif args.command == "report":
                 result = store.report(args.as_of)
+            elif args.command == "annotate":
+                updates = {}
+                for name in ("outcome", "review"):
+                    source_path = getattr(args, name)
+                    if source_path:
+                        with open(source_path, encoding="utf-8") as source:
+                            value = json.load(source)
+                        if not isinstance(value, dict):
+                            raise ValueError("annotation file must contain a JSON object")
+                        updates[name] = value
+                result = store.annotate(args.episode_id, **updates)
             else:
                 result = store.promote(args.output, args.as_of)
         print(json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False))
         return 0
+    except KeyError:
+        parser.exit(2, "error: episode was not found\n")
     except (ValueError, OSError, sqlite3.Error) as exc:
-        parser.exit(2, f"error: {exc}\n")
+        # File names, malformed JSON keys, or driver messages may contain secret
+        # user data. Expose only the error type and a stable corrective hint.
+        parser.exit(2, f"error: {type(exc).__name__}: operation failed; check input format and local paths\n")
 
 
 if __name__ == "__main__":

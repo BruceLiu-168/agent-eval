@@ -25,7 +25,8 @@ MUTATIONS = {"commit_refund", "grant_access"}
 
 def load_demo_cases() -> list[dict[str, Any]]:
     """Load the checked-in examples without altering them."""
-    source = Path(__file__).resolve().parents[1] / "examples" / "cases.jsonl"
+    from .scaffold import bundled_dataset
+    source = bundled_dataset()
     return [json.loads(line) for line in source.read_text(encoding="utf-8").splitlines()
             if line.strip()]
 

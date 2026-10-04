@@ -10,3 +10,11 @@ venv/
 *.db
 *.db-*
 MANIFEST.sha256
+runs/
+data/
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+!agent_eval/data/
+!agent_eval/data/*.jsonl

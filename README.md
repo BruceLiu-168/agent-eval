@@ -1,86 +1,98 @@
-# Agent Eval：三种可运行方案
+# Agent Eval
 
-面向多业务企业 Agent 的研究型参考实现。建议采用 **A 离线门禁 + B 线上回流** 作为基础，在退款、授权等有副作用的关键业务加入 **C 状态仿真**。
+面向多业务企业 Agent 的本地评测框架。接入自己的 Agent 和数据，即可校验数据、执行多版本实验、独立评分、查看报告，并将经过审核的线上失败回流为回归案例。
 
-项目只依赖 Python 标准库，在 Python 3.12 验证。当前 Agent 是脚本策略，业务、成本、延迟及线上事件均为合成数据；没有接入真实模型、厂商平台或生产系统。这里实现的是可运行核心，不是已经上线的企业评测平台。
+**当前版本 v0.2.0**：Python 3.10+，运行时仅依赖标准库；支持 Python / HTTP / command 接入、规则与可选 LLM 评分、重复试验、断点恢复及离线 HTML 报告。内置测试 Agent 和数据均为模拟，不调用付费模型。真实业务效果由你在本地提供的数据与独立 oracle 验证。
 
-## 快速运行
+## 十分钟跑通
 
 ```bash
 git clone https://github.com/BruceLiu-168/agent-eval.git
 cd agent-eval
-python -m agent_eval demo --out artifacts/demo
-python -m unittest discover -s tests -v
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install .
+
+# 建议将自己的数据项目放在代码仓库外。
+agent-eval init ../my-agent-eval
+cd ../my-agent-eval
+agent-eval validate --config eval.json
+agent-eval run --config eval.json --out runs/first
 ```
 
-`demo` 执行三种方案，并完成“模拟线上失败 → 审核后的回归案例 → 修复版本复测”。它返回 0 表示演示执行完成，**不是发布获批**。发布决策在报告的 `gate.decision` 中。
+Windows 的环境激活命令为 `.venv\Scripts\activate`。打开 `runs/first/report.html` 查看报告；同目录还有 `report.json`、`results.csv`、`manifest.json` 和 `records.jsonl`。HTML 无外部资源依赖，可直接离线查看。
+
+演示候选在 13 个场景中得到 **11 pass、2 infra_error**；门禁为 **INCONCLUSIVE**。这是刻意保留的依赖故障和证据不足，不能解释成真实业务验证通过。`run` 默认退出码 0 仅代表实验执行完毕；CI 使用 `--enforce-gate`，或执行 `agent-eval gate --report runs/first/report.json`，只有门禁 PASS 才返回 0，BLOCK 返回 2，INCONCLUSIVE 返回 3。
+
+```bash
+# 安装后独立验收：三种接入 + 本地 HTTP Agent + 断点恢复。
+agent-eval self-test
+
+# 相同配置、数据和实现下恢复，只补未写入 checkpoint 的任务。
+agent-eval run --config eval.json --out runs/first --resume
+```
+
+## 接入真实业务
+
+1. 将 `data/cases.jsonl` 替换为业务案例，定义 `expected_state`、`expected_output`、`checks` 或 `rubric`；真值来自业务规则、可信状态观察或专家标签。
+2. 修改生成的 `custom_adapter.py`，或选择 HTTP / command 模板；返回真实 `output`、工具 `events` 和独立读取的 `final_state`，缺少成本或延迟时保留 `null`。
+3. 在 `eval.json` 中冻结 Agent 版本、执行次数、预算和评分器版本，然后运行。不同版本可用 `version_adapters` 指向不同服务或程序。
+4. 用固定回归集检查修复，用独立留出集检查泛化；再以成熟的线上业务结果确认效果。
+
+已有历史执行记录时无需再次调用 Agent：
+
+```bash
+agent-eval evaluate --dataset data/cases.jsonl --episodes data/episodes.jsonl --out runs/replay
+```
+
+完整步骤和可复制示例见 [本地使用指南](docs/LOCAL_USAGE.md) 与 [数据、接入及评分契约](docs/DATA_CONTRACT.md)。`init --template http` 生成 HTTP 项目，另开终端执行 `agent-eval serve-agent --port 8765` 即可使用内置测试服务。
 
 ## 三种方案与取舍
 
-| 方案 | 已实现内容 | 优点 | 代价与边界 | 适用场景 |
-|---|---|---|---|---|
-| A：CI 离线门禁 | JSONL 数据集、可插拔 Agent adapter、成对比较、绝对质量下限、状态与轨迹约束、版本指纹、统计门禁 | 接入简单，变更可追踪，发布前快速发现回归 | 对未知线上问题不敏感；静态集会过拟合；必须另接真实 Agent 和业务 oracle | 已有 CI，先建立质量基线 |
-| B：线上 Trace 回流 | SQLite 接入、随机/风险双通道、延迟结果回填、脱敏、审核、幂等回流 | 面向真实分布持续发现问题，形成可复测样本 | 依赖业务结果与审核；标签缺失会偏置；本地 SQLite 不是高吞吐多租户服务 | 已有流量，需持续优化与事故复盘 |
-| C：有状态仿真 | 退款和权限申请环境、3 个策略版本、13 个场景、多 Agent 交接、故障注入与重复运行 | 检查实际副作用，覆盖超时、重复写入、越权等难题 | 每种业务要维护状态模型；仿真偏差必须用真实轨迹和沙箱集成验证 | 工具写操作、多轮任务、关键业务 |
+建议组合 **A 离线门禁 + B 线上回流**，关键写操作业务加入 **C 状态仿真**。
 
-三种方案共享同一 Case/Episode/Grade 契约，能分别运行，也能组合。A 不负责采集生产流量，B 不证明业务仿真正确，C 不证明线上效果提升。
+| 方案 | 已实现 | 优点 | 代价与边界 |
+|---|---|---|---|
+| A：离线评测与门禁 | 多版本实验、输出/状态/轨迹评分、重复试验、版本指纹、保守统计门禁 | 本地接入简单，可追踪回归，能接 CI | 静态集会过拟合；需要独立真值和留出集 |
+| B：线上证据回流 | SQLite 接入、随机/风险双流、延迟标签、审核、脱敏和幂等回流 | 持续发现实际分布中的失败，形成复测数据 | 需要业务结果与人工审核；本地存储不承担生产高吞吐采集 |
+| C：有状态测试 Agent | 退款/授权环境，正常/回归版本，故障、幂等、审批和交接场景 | 验证副作用与工具轨迹，框架验收无需模型密钥 | 每个业务要维护状态模型；合成通过率不能替代真实效果 |
 
-## 独立命令
-
-```bash
-# A：预期返回 3，因示例样本不足且存在故障场景。
-python -m agent_eval offline --out artifacts/offline.json
-
-# A：故意回归的策略，预期返回 2，阻断发布。
-python -m agent_eval offline --candidate regressed --out artifacts/blocked.json
-
-# C：重复执行有状态场景；成本和时延为模拟值。
-python -m agent_eval simulate --trials 3 --out artifacts/simulation.json
-
-# B：查看 demo 产生的本地事件与回归集。
-python -m agent_eval.online --db artifacts/demo/online.sqlite report --as-of 2026-10-04T12:00:00Z
-python -m agent_eval.online --db artifacts/demo/online.sqlite promote artifacts/demo/regression.jsonl --as-of 2026-10-04T12:00:00Z
+```mermaid
+flowchart LR
+  A[真实任务与业务结果] --> B[随机抽样 / 风险发现]
+  B --> C[成熟标签、审核、脱敏、去重]
+  C --> D[版本化回归案例]
+  D --> E[修复候选与离线实验]
+  E --> F{门禁}
+  F -->|充分证据且通过| G[业务方灰度与成熟结果验证]
+  F -->|失败或证据不足| E
+  G --> A
 ```
 
-离线命令退出码：`0=PASS`、`2=BLOCK`、`3=INCONCLUSIVE`。CI 应仅接受 0。样本不足、缺配对结果、未知判定或基础设施故障都不能获得 PASS。
+框架提供采集文件接入至回流复测及门禁判定；生产 Trace 采集、灰度和回滚由业务系统集成。`agent-eval demo --out artifacts/demo` 可运行旧版三方案闭环演示。
 
-新事件文件的接入语法：`python -m agent_eval.online --db artifacts/online.sqlite ingest YOUR_EVENTS.jsonl --random-rate 0.2`。事件契约见 [设计文档](docs/DESIGN.md)。延迟业务结果通过 Python API `OnlineStore.annotate(episode_id, outcome=..., review=...)` 回填。
+## 指标如何解读
 
-## 如何看结果
+- `pass / fail / unknown / infra_error` 分开统计；评分超时、无真值、缺业务状态都不会自动通过。已观察到的严重违规不能被评分器故障掩盖。
+- 报告同时展示已判定样本通过率、全部执行通过占比、证据覆盖率和数据集覆盖率；只导入部分用例时明确列出缺失数量。
+- 重复试验的“至少一次成功”和“每次都成功”分开展示。门禁按 case 的全部试验聚合，再以独立 `family_id` 为单位，不靠重复执行虚增独立样本。
+- 未提供的费用不补零；Agent 上报时延与框架实测调用时延分开，模拟数据保留来源标记。
+- 线上质量估计只基于成熟且有标签的随机样本；风险样本用于发现失败。缺失标签可能带来偏差。
 
-| 文件 | 用途 |
-|---|---|
-| `artifacts/demo/offline.json` | 基线与候选的逐案例结果、指标、门禁理由和数据/代码指纹 |
-| `artifacts/demo/blocked.json` | 越权策略的阻断证据 |
-| `artifacts/demo/simulation.json` | 重复执行结果及工具事件 |
-| `artifacts/demo/online.json` | 随机质量估计、风险发现、待成熟与未知标签 |
-| `artifacts/demo/promotion.json` | 回流数量、重复样本及拒绝原因 |
-| `artifacts/demo/regression.jsonl` | 通过审核、有独立 oracle 的失败回归案例 |
-| `artifacts/demo/loop-validation.json` | 回流案例上的基线与修复版本复测 |
+## 执行与数据边界
 
-候选策略在 13 个演示场景中得到 **11 pass、2 infra_error**。两项故障保留为未解决依赖问题，不算成功。故意越权的策略被 BLOCK。回归集不能同时用作独立的泛化证明；真实发布还需要未参与调参的留出集。
+新 `run` 路径将 Agent 和评分器放入带超时的子进程，限制输入/输出体积，不自动重试写操作。它是执行控制，不是针对恶意代码的安全沙箱。向 Agent 传递的 Case 使用白名单，参考答案、rubric 和评测元数据不会被 Runner 传入；进程仍拥有本地文件与网络权限，敏感留出集的强隔离需另配容器或独立环境。
 
-## 扩展到真实 Agent
+恢复只跳过已持久化的结果。如果进程在业务写入之后、结果落盘之前中断，恢复可能再次执行该任务；真实业务必须使用沙箱、稳定幂等键或可恢复的任务 ID。HTTP 本地超时也不保证远端操作已取消。报告与 checkpoint 留在本地，原始记录可能含业务数据，应按本地访问规则保存；默认忽略 `data/`、`runs/`、`.env` 等，不将其提交到 Git。
 
-实现 `run_case(case: dict, version: str, seed: int) -> dict`，再指定：
+LLM judge 需显式配置服务地址、模型、版本和密钥环境变量。启用后会向该服务发送评分所需文本；默认规则评分和内置验收均离线运行。脱敏能力只是基础敏感键与邮箱处理，不能代替完整业务脱敏。人工标注 UI、生产多租户门户、托管流量接入和灰度控制未包含在本地框架中。
+
+## 开发与资料
 
 ```bash
-python -m agent_eval offline --dataset YOUR_CASES.jsonl --adapter your_package:run_case --baseline v1 --candidate v2
+python -m unittest discover -s tests -v
+python -m agent_eval self-test
+python -m pip wheel . --no-deps -w dist
 ```
 
-Runner 会删除 `expected_state` 和轨迹断言后再调用 adapter，防止直接泄漏评测答案。真实 adapter 应只把业务输入和必要上下文发送给 Agent，通过独立沙箱/业务 API 读取最终状态；不要把 Agent 自述塞进 `final_state`。Python 同进程不是针对恶意被测代码的隔离边界，生产执行需独立进程/容器及最小权限。
-
-新增业务需要定义初态、可执行工具、结果验证器、关键动作约束和超时处理。多轮和多 Agent 共用 episode，工具事件保留 `agent_id`；生产还需补充 span 父子关系和状态版本。
-
-## 当前实现的明确限制
-
-- 状态 oracle 和规则 grader 已实现；LLM judge 调用、人工标注 UI、judge 版本桥接未实现。`calibrate_judge` 可对外部提供的人工/机器标签计算严重错误召回与弃权率。
-- 仿真覆盖两个业务的离散状态与脚本策略，没有声称覆盖任意 Agent、任意用户行为或 LLM 非确定性。
-- 在线存储保留脱敏事件，抽样决定评测流归属，不是按采样率减少全部存储。风险流与随机流可能重叠，不能将数量相加作为独立样本数。
-- 线上成功率是成熟且已获得标签的随机样本的逆概率加权比率；缺失标签仍可能带来偏差，尚未实现置信区间、用户级聚类及 A/B 实验统计。
-- 脱敏处理敏感键和邮箱文本；邮箱以每个 store 的 HMAC 伪名保留身份相等关系，但不保证域名规则等任意业务语义。它不是完备 DLP，生产需要业务脱敏适配、密钥管理、租户隔离、加密、保留期限和访问审计。
-- `as_of` 过滤观测/成熟时间；回填后报告使用当前标签，不提供历史标签快照。生产需要追加式标注事件与结果修订审计。
-- SQLite/JSONL 适合本地原型。回流使用单个 store 管理目标文件，文件替换与数据库提交不是跨资源分布式事务；进程崩溃后的恢复依靠目标文件语义去重。
-- 未连接生产发布、灰度或回滚系统，门禁只生成决策和退出码；未实现真实厂商 API adapter。
-
-进一步阅读：[厂商调研](docs/RESEARCH.md) · [闭环架构与实施路线](docs/DESIGN.md)。
+[交付目标](docs/GOAL.md) · [验收记录](docs/VALIDATION.md) · [厂商调研](docs/RESEARCH.md) · [美团方法](docs/RESEARCH_MEITUAN.md) · [架构与统计门禁](docs/DESIGN.md)
